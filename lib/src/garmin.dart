@@ -124,7 +124,7 @@ GarminMlrPacket? garminDecodeMlr(List<int> data) {
   if (data.isEmpty) return null;
   if ((data[0] & _kMlrFlag) != 0) {
     final handle = (data[0] & _kMlrHandleMask) >> _kMlrHandleShift;
-    return GarminMlrData(handle, Uint8List.fromList(data));
+    return GarminMlrData(handle, Uint8List.fromList(data.sublist(1)));
   }
   if (data[0] != 0) return null;
   if (data.length < 2) return null;

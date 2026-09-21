@@ -114,6 +114,7 @@ void main() {
       final decoded = garminDecodeMlr([0x80 | (2 << 4), 1, 2, 3]);
       expect(decoded, isA<GarminMlrData>());
       expect((decoded as GarminMlrData).handle, 2);
+      expect(decoded.payload, [1, 2, 3], reason: 'routing byte 0 must be stripped');
     });
 
     test('a non-flagged, non-zero first byte is rejected, not a data frame',
