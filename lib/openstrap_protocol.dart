@@ -18,6 +18,16 @@ export 'src/band.dart' show DeviceType, GattProfile, BandProfile;
 // sharing one barrel must not share a bare verb.
 export 'src/oura.dart';
 export 'src/hrs.dart';
+export 'src/ring11m.dart';
+export 'src/garmin.dart';
+export 'src/ultrahuman.dart';
+export 'src/wearfit.dart';
+export 'src/o2ring.dart';
+export 'src/ringconn.dart';
+export 'src/zetime.dart';
+export 'src/dafit.dart';
+export 'src/polar_pmd.dart';
+export 'src/lefun.dart';
 
 // Source 1 — record decoders.
 export 'src/records.dart'
@@ -131,8 +141,6 @@ export 'src/commands.dart'
         cmdDisableAlarm,
         kDefaultAlarmHaptics,
         gen5ClientHello,
-        cmdGetDataRangeGen5,
-        cmdSendHistoricalGen5,
         cmdSetClockGen5,
         cmdGetClockGen5,
         cmdBuzzGen5Maverick,

@@ -117,6 +117,15 @@ void main() {
       expect(frame.inner, [0x23, 0x06, 0x22, 0x00]);
     });
 
+    test('cmdGetDataRange(profile: gen5) frames with the gen5 envelope', () {
+      final frame = parseFrame(
+          cmdGetDataRange(0x07, profile: BandProfile.gen5),
+          profile: BandProfile.gen5)!;
+      expect(frame.valid, isTrue);
+      // gen5 body is empty — inner is [type][seq][opcode] padded to /4.
+      expect(frame.inner, [0x23, 0x07, 0x22, 0x00]);
+    });
+
     test('cmdSetClock builds the WHOOP-exact 8-byte sec+subsec payload', () {
       // Fixed instant: sec = 0x12345678, millis = 500.
       // subsec = 500 * 32768 ~/ 1000 = 16384 = 0x4000 (u16 LE, then 2 zero pad).
@@ -206,6 +215,42 @@ void main() {
       expect(pack.statusRaw, 7);
     });
 
+    test('0x97 battery pack info on gen5 decodes when cmd_status is ok', () {
+      final inner = hexToBytes(
+        '240297'
+        '0701' // echoed request seq, status = 1 (ok)
+        '0101'
+        '112233445566'
+        '50756666696e20426174746572790000'
+        '0000'
+        '0c'
+        '07',
+      );
+      final resp = parseCommandResponse(inner, profile: BandProfile.gen5)!;
+      final pack = resp.decoded['battery_pack_info'] as BatteryPackInfoResponse;
+      expect(pack.identifier, '11:22:33:44:55:66');
+    });
+
+    test(
+        '0x97 battery pack info on gen5 is dropped when cmd_status is not ok',
+        () {
+      // Same stale-but-full-length body as above, but cmd_status = 0
+      // (failed) — a gen5 reply's body is unpopulated on failure, so these
+      // bytes must not be trusted.
+      final inner = hexToBytes(
+        '240297'
+        '0700' // echoed request seq, status = 0 (failed)
+        '0101'
+        '112233445566'
+        '50756666696e20426174746572790000'
+        '0000'
+        '0c'
+        '07',
+      );
+      final resp = parseCommandResponse(inner, profile: BandProfile.gen5)!;
+      expect(resp.decoded.containsKey('battery_pack_info'), isFalse);
+    });
+
     test('0x07 version info is surfaced honestly as raw payload', () {
       final inner = hexToBytes('24010700112233445566778899aabbccddeeff0011');
       final resp = parseCommandResponse(inner)!;
@@ -222,6 +267,16 @@ void main() {
       expect(resp.opcode, Cmd.selectWrist);
       expect(ack.revision, 1);
       expect(ack.payload, [0x01, 0x02]);
+    });
+
+    test('0x7b select wrist response is dropped when cmd_status is not ok',
+        () {
+      // Same stale-but-plausible body as above, but cmd_status = 0 (failed)
+      // — a failure reply's body is unpopulated, so these bytes must not be
+      // trusted as confirmation the wrist selection took effect.
+      final inner = hexToBytes('24037b' '0700' '0102');
+      final resp = parseCommandResponse(inner)!;
+      expect(resp.decoded.containsKey('select_wrist'), isFalse);
     });
   });
 

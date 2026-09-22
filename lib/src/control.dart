@@ -439,7 +439,7 @@ class Gen5HelloInfo {
     final batteryRaw = u32(body, 1) ~/ 10;
     return Gen5HelloInfo(
       helloRevision: body[0],
-      batteryPct: (batteryRaw >= 0 && batteryRaw <= 100) ? batteryRaw : null,
+      batteryPct: batteryRaw <= 100 ? batteryRaw : null,
       charging: (body[5] & 0x01) != 0,
       tsSeconds: u32(body, 6),
       tsSubseconds: u32(body, 10),
@@ -837,13 +837,22 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     // (pay[93]==body[91] is the fw MAJOR byte, which is only why the old
     // ==50 gate happened to hold). Both are superseded by the full map.
     //
+    // PROFILE-GATED: this same opcode is also how gen4 answers
+    // cmdGetHelloModern (see commands.dart), whose reply body shape is NOT
+    // confirmed to match gen5's fixed Gen5HelloInfo map. Running a gen4
+    // reply through that map would misattribute its fields at gen5's byte
+    // offsets — a confidently wrong serial/firmware/battery reading for a
+    // device that isn't gen5, or a silently dropped reply if it's shorter
+    // than gen5's 104-byte body. Until gen4's modern-hello layout is
+    // verified, this branch stays gen5-only and emits nothing for gen4.
+    //
     // STATUS-GATED, like the battery and clock reads above/below: hello
     // answers PENDING (2) before its terminal result, and FAILURE (0) /
     // UNSUPPORTED (3) are real wire cases. A non-success reply does not
     // populate the body, so its bytes are whatever the buffer held last —
     // parsing them would mint a confident serial, battery and firmware version
     // out of stale memory.
-    if (status == 1) {
+    if (profile.isGen5 && status == 1) {
       final body =
           payload.length >= 2 ? Uint8List.sublistView(payload, 2) : payload;
       final h = Gen5HelloInfo.parse(body);
@@ -876,10 +885,18 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     //   body[2:6] epoch u32 LE   body[6:8] subseconds u16 LE
     // — which confirms the epoch offset used here, and adds the active flag.
     // The response carries no alarm ID; the requested ID selects it.
+    //
+    // Status-gated on gen5 ONLY, same convention as getClock/getDataRange/
+    // getBatteryPackInfo above: this opcode is sent to both profiles (see
+    // commands.dart), gen5's status byte is confirmed so a failure/deferred
+    // reply's stale body (leftover bytes from a prior successful read) isn't
+    // reported as the strap's current alarm; gen4's status byte is
+    // unconfirmed so it stays ungated, same reasoning as those siblings.
+    final statusOk = !profile.isGen5 || status == 1;
     final form = payload.length >= 3 ? payload[2] : -1;
-    if (form == 0x01 && payload.length >= 7) {
+    if (statusOk && form == 0x01 && payload.length >= 7) {
       dec['alarm_epoch'] = u32(payload, 3);
-    } else if (form == 0x04 && payload.length >= 8) {
+    } else if (statusOk && form == 0x04 && payload.length >= 8) {
       dec['alarm_epoch'] = u32(payload, 4);
       // "exactly 1 means active" — anything else is not an armed alarm, and is
       // reported as inactive rather than guessed at.
@@ -915,7 +932,14 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     // (= payload[5]), exactly where _decodeAdvName already reads them.
     // Without this branch the gen5 bootstrap's final pre-READY read was sent
     // but its reply never decoded.
-    dec['strap_name'] = _decodeAdvName(payload);
+    //
+    // STATUS-GATED, like the battery and clock reads above: a non-success
+    // reply does not populate the body, so its bytes are whatever the buffer
+    // held last — _decodeAdvName's printable-run fallback can turn that stale
+    // data into a plausible-looking name.
+    if (status == 1) {
+      dec['strap_name'] = _decodeAdvName(payload);
+    }
   } else if (op == Cmd.getClock || op == Cmd.getClockGen5) {
     // Reply bodies (the body starts at payload[2]):
     //   gen4 0x0B: 8 B  [u32 sec][u32 subsec]         → seconds @ payload[2]
@@ -961,7 +985,15 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     // (mod 4), so the grid could never land on either and range_oldest /
     // range_newest were never emitted at all.
     final revOk = payload.length > 2 && payload[2] == 1;
-    if (revOk && payload.length >= 63) {
+    // Status-gated like the clock read above: a failure reply leaves the body
+    // unpopulated, so a stale revision byte and stale-but-plausible page/
+    // backlog numbers from a prior successful read would otherwise be
+    // reported as current. Same shared-opcode shape as getClock/getClockGen5
+    // (this opcode is used by both profiles — see commands.dart), so gen4
+    // is deliberately left ungated for the same unconfirmed-status-byte
+    // reason documented there.
+    final statusOk = !profile.isGen5 || status == 1;
+    if (statusOk && revOk && payload.length >= 63) {
       final oldest = u32(payload, 35);
       final newest = u32(payload, 59);
       if (_plausibleUnix(oldest) &&
@@ -975,7 +1007,7 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     // strap's own view of its ring buffer, which is what separates a stalled
     // offload from an idle one. Degrades safely: implausible values emit
     // nothing at all.
-    if (revOk && payload.length >= 35) {
+    if (statusOk && revOk && payload.length >= 35) {
       final writePage = u32(payload, 11);
       final capacity = u32(payload, 23); // TotalPages
       if (capacity > 0 && writePage <= capacity) {
@@ -994,31 +1026,54 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     // starts after the response header, i.e. at payload[2] — reading from
     // payload[0] landed on the echoed-seq/status pair, so `locationRaw` was
     // the status byte and resolved to "wrist" on every successful reply.
-    dec['body_location_status'] = BodyLocationStatusResponse(
-      revision: payload[2],
-      locationRaw: payload[5],
-      confidence: payload[4], // constant 0xFF on every observed reply
-      status: payload[3], // constant 0
-    );
+    //
+    // Status-gated like the siblings above: a failed outer reply does not
+    // populate the body, so its bytes are stale and would otherwise mint a
+    // confident (and wrong) body-location reading.
+    final statusOk = !profile.isGen5 || status == 1;
+    if (statusOk) {
+      dec['body_location_status'] = BodyLocationStatusResponse(
+        revision: payload[2],
+        locationRaw: payload[5],
+        confidence: payload[4], // constant 0xFF on every observed reply
+        status: payload[3], // constant 0
+      );
+    }
   } else if ((op == Cmd.enterHighFreqSync || op == Cmd.exitHighFreqSync)) {
     dec['high_freq_sync'] = HighFreqSyncResponse(op);
   } else if (op == Cmd.selectWrist && payload.length >= 3) {
-    dec['select_wrist'] = SelectWristResponse(
-      revision: payload[2],
-      payload: Uint8List.fromList(payload.sublist(2)),
-    );
+    // Status-gated like getHello above: this is a SET-style confirmation,
+    // and a failure reply does not populate the body, so its bytes are
+    // stale. Without the check a rejected wrist-selection write (bad value,
+    // or refused mid-handshake) would still mint a `select_wrist` object
+    // that looks like confirmation the selection took effect.
+    if (status == 1) {
+      dec['select_wrist'] = SelectWristResponse(
+        revision: payload[2],
+        payload: Uint8List.fromList(payload.sublist(2)),
+      );
+    }
   } else if (op == Cmd.getBatteryPackInfo && payload.length >= 30) {
     // 28-byte body [rev][attached][id ×6][name ×16][u16][type][status], again
     // starting at payload[2]. Every field was previously read two bytes early,
     // so type/status were reading the two halves of the unnamed u16.
-    dec['battery_pack_info'] = BatteryPackInfoResponse(
-      revision: payload[2],
-      attached: payload[3] == 1,
-      identifier: _macAddress(payload, 4),
-      name: _batteryPackName(payload),
-      batteryPackTypeRaw: payload[28],
-      statusRaw: payload[29],
-    );
+    //
+    // Status-gated on gen5 ONLY, same convention as getClock/getDataRange
+    // above: this opcode is sent to both profiles (see commands.dart), gen5's
+    // status byte is confirmed so a failure reply's stale body is dropped,
+    // gen4's is unconfirmed so it stays ungated to avoid silently losing
+    // valid gen4 replies.
+    final statusOk = !profile.isGen5 || status == 1;
+    if (statusOk) {
+      dec['battery_pack_info'] = BatteryPackInfoResponse(
+        revision: payload[2],
+        attached: payload[3] == 1,
+        identifier: _macAddress(payload, 4),
+        name: _batteryPackName(payload),
+        batteryPackTypeRaw: payload[28],
+        statusRaw: payload[29],
+      );
+    }
   } else if (op == Cmd.reportVersionInfo) {
     dec['version_info'] = <String, dynamic>{
       'payload_len': payload.length,
@@ -1248,6 +1303,12 @@ ConsoleLogChunk? parseConsoleLog(Uint8List inner) {
 /// run has accumulated so far. A gap in `record_index` (a dropped/reordered
 /// frame) flushes what's buffered rather than silently splicing unrelated
 /// text together.
+///
+/// Check [hasCompletedRun] before calling [flush] — don't react to [add]'s
+/// raw boolean. `add()` returning false means "not contiguous with the last
+/// chunk", which is also true for the very first chunk into a fresh or
+/// just-flushed instance; flushing on every `false` would hand back that lone
+/// chunk instead of letting the run keep building.
 class ConsoleLogReassembler {
   final StringBuffer _buf = StringBuffer();
 
@@ -1257,9 +1318,14 @@ class ConsoleLogReassembler {
   String? _completed;
   int? _lastIndex;
 
+  /// True when a gap has parked a finished run for [flush] to return. Use
+  /// this, not [add]'s return value, to decide whether to call [flush].
+  bool get hasCompletedRun => _completed != null;
+
   /// Feed one decoded chunk. Returns true if it extended the current
-  /// contiguous run; false if it started a new one — call [flush] after a
-  /// `false` return to get the run the gap ended.
+  /// contiguous run; false if it started a new one — check
+  /// [hasCompletedRun] (not this return value) to know when a finished run
+  /// is ready for [flush].
   bool add(ConsoleLogChunk chunk) {
     final contiguous = _lastIndex != null &&
         // record_index is a u8 — allow wraparound at 0xFF, matching the

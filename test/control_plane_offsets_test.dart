@@ -180,6 +180,43 @@ void main() {
           dataRangeBody(writePage: 200000, totalPages: 131072)))!;
       expect(r.decoded.containsKey('pages_behind'), isFalse);
     });
+
+    test('gen5: a non-success outer status emits neither range nor backlog',
+        () {
+      // A failure reply's body bytes are stale leftovers from a prior
+      // successful read; the revision byte alone (payload[2]==1) is not
+      // enough to trust them.
+      for (final status in [0, 2, 3]) {
+        final r = parseCommandResponse(
+            cmdResponse(Cmd.getDataRange, dataRangeBody(), status: status),
+            profile: BandProfile.gen5)!;
+        expect(r.decoded.containsKey('range_oldest'), isFalse,
+            reason: 'status=$status');
+        expect(r.decoded.containsKey('range_newest'), isFalse,
+            reason: 'status=$status');
+        expect(r.decoded.containsKey('pages_behind'), isFalse,
+            reason: 'status=$status');
+      }
+    });
+
+    test('gen5: a success outer status still decodes normally', () {
+      final r = parseCommandResponse(
+          cmdResponse(Cmd.getDataRange, dataRangeBody(), status: 1),
+          profile: BandProfile.gen5)!;
+      expect(r.decoded['range_oldest'], 1780000000);
+      expect(r.decoded['range_newest'], 1786000000);
+      expect((r.decoded['pages_behind'] as Map)['written'], 30);
+    });
+
+    test('gen4 is left ungated on outer status, unlike gen5', () {
+      // Matches getClock's gen4 policy a few groups up: the status byte's
+      // semantics are unconfirmed on gen4, so gating it would silently drop
+      // range/backlog emission rather than risk a stale read.
+      final r = parseCommandResponse(
+          cmdResponse(Cmd.getDataRange, dataRangeBody(), status: 0))!;
+      expect(r.decoded['range_oldest'], 1780000000);
+      expect(r.decoded['range_newest'], 1786000000);
+    });
   });
 
   // The alarm/haptics status byte: the SET and RUN
@@ -273,6 +310,81 @@ void main() {
       expect(get4(2)['alarm_active'], isFalse);
     });
 
+    test(
+        'gen5: a non-success outer status emits neither alarm_epoch nor '
+        'alarm_active', () {
+      // Same convention as getClock/getDataRange: a failure/deferred reply's
+      // body bytes are stale leftovers from a prior successful read.
+      final body = [0x04, 1, ...le32(1786000000), ...le16(0)];
+      for (final status in [0, 2, 3]) {
+        final r = parseCommandResponse(
+            cmdResponse(Cmd.getAlarmTime, body, status: status),
+            profile: BandProfile.gen5)!;
+        expect(r.decoded.containsKey('alarm_epoch'), isFalse,
+            reason: 'status=$status');
+        expect(r.decoded.containsKey('alarm_active'), isFalse,
+            reason: 'status=$status');
+      }
+    });
+
+    test('gen5: a success outer status still decodes normally', () {
+      final body = [0x04, 1, ...le32(1786000000), ...le16(0)];
+      final r = parseCommandResponse(
+          cmdResponse(Cmd.getAlarmTime, body, status: 1),
+          profile: BandProfile.gen5)!;
+      expect(r.decoded['alarm_epoch'], 1786000000);
+      expect(r.decoded['alarm_active'], isTrue);
+    });
+
+    test('gen4 is left ungated on outer status, unlike gen5', () {
+      // Matches getClock/getDataRange's gen4 policy: the status byte's
+      // semantics are unconfirmed on gen4, so gating it would silently drop
+      // valid alarm reads rather than risk a stale one.
+      final body = [0x04, 1, ...le32(1786000000), ...le16(0)];
+      final r = parseCommandResponse(
+          cmdResponse(Cmd.getAlarmTime, body, status: 0))!;
+      expect(r.decoded['alarm_epoch'], 1786000000);
+      expect(r.decoded['alarm_active'], isTrue);
+    });
+
+    test(
+        'GET_BODY_LOCATION_AND_STATUS: gen5 a non-success outer status emits '
+        'nothing', () {
+      // Same convention as getClock/getDataRange/getAlarmTime: a failure
+      // reply's body bytes are stale leftovers from a prior successful read.
+      final body = [0x01, 0x00, 0xFF, 0x07];
+      for (final status in [0, 2, 3]) {
+        final r = parseCommandResponse(
+            cmdResponse(Cmd.getBodyLocationAndStatus, body, status: status),
+            profile: BandProfile.gen5)!;
+        expect(r.decoded.containsKey('body_location_status'), isFalse,
+            reason: 'status=$status');
+      }
+    });
+
+    test('GET_BODY_LOCATION_AND_STATUS: gen5 a success outer status still '
+        'decodes normally', () {
+      final body = [0x01, 0x00, 0xFF, 0x07];
+      final r = parseCommandResponse(
+          cmdResponse(Cmd.getBodyLocationAndStatus, body, status: 1),
+          profile: BandProfile.gen5)!;
+      final decoded =
+          r.decoded['body_location_status'] as BodyLocationStatusResponse;
+      expect(decoded.revision, 1);
+      expect(decoded.locationRaw, 7);
+    });
+
+    test('GET_BODY_LOCATION_AND_STATUS: gen4 is left ungated on outer status',
+        () {
+      final body = [0x01, 0x00, 0xFF, 0x07];
+      final r = parseCommandResponse(
+          cmdResponse(Cmd.getBodyLocationAndStatus, body, status: 0))!;
+      final decoded =
+          r.decoded['body_location_status'] as BodyLocationStatusResponse;
+      expect(decoded.revision, 1);
+      expect(decoded.locationRaw, 7);
+    });
+
     test('gen5 GET_CUSTOM_ADVERTISING_NAME (0x8D) decodes like gen4 0x4C', () {
       // Reply body: revision, status, length, then the ASCII name — the same
       // shape at the same offsets on both generations.
@@ -285,6 +397,27 @@ void main() {
           cmdResponse(Cmd.getAdvertisingNameHarvard, body))!;
       expect(g5.decoded['strap_name'], name);
       expect(g4.decoded['strap_name'], name);
+    });
+
+    test(
+        'GET_ADVERTISING_NAME is status-gated, like the battery/hello/clock reads',
+        () {
+      // A FAILURE/PENDING/UNSUPPORTED reply does not populate the body —
+      // these bytes are stale buffer contents shaped like a plausible name,
+      // exactly the shape a real failure reply could leave behind.
+      const stale = 'Band-7';
+      final body = [0x01, 0x00, stale.length, ...stale.codeUnits];
+      for (final status in [0, 2, 3]) {
+        final g5 = parseCommandResponse(
+            cmdResponse(Cmd.getCustomAdvertisingName, body, status: status),
+            profile: BandProfile.gen5)!;
+        final g4 = parseCommandResponse(
+            cmdResponse(Cmd.getAdvertisingNameHarvard, body, status: status))!;
+        expect(g5.decoded.containsKey('strap_name'), isFalse,
+            reason: 'status=$status');
+        expect(g4.decoded.containsKey('strap_name'), isFalse,
+            reason: 'status=$status');
+      }
     });
   });
 
@@ -525,6 +658,28 @@ void main() {
       expect(r.flush(), 'BLE_CMD: Command Send Historical Data\n');
       expect(r.add(parseConsoleLog(logPacket(10, '!'))!), isTrue);
       expect(r.flush(), 'after the gap!');
+    });
+
+    test(
+        'a caller that only flushes on hasCompletedRun keeps a 4-chunk line '
+        'whole, even though every add() returns false on a fresh instance',
+        () {
+      // add() returning false on the very first chunk into a fresh instance
+      // used to be indistinguishable from a real gap. A caller that flushed
+      // on every `false` (the old documented contract) reset _lastIndex each
+      // time, so record_index 5/6/7/8 came back as four single-chunk
+      // fragments instead of one line.
+      final r = ConsoleLogReassembler();
+      for (final chunk in [
+        logPacket(5, 'BLE_'),
+        logPacket(6, 'CMD: '),
+        logPacket(7, 'Historical '),
+        logPacket(8, 'Data\n'),
+      ]) {
+        r.add(parseConsoleLog(chunk)!);
+        if (r.hasCompletedRun) r.flush();
+      }
+      expect(r.flush(), 'BLE_CMD: Historical Data\n');
     });
   });
 

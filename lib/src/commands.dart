@@ -93,23 +93,28 @@ final List<Uint8List> initPackets = [
 ];
 
 // ── Convenience builders for live ops ──────────────────────────────────────
-Uint8List cmdLinkValid(int seq) =>
-    buildCommand(seq, Cmd.linkValid, const [0x00]);
-Uint8List cmdGetBattery(int seq) =>
-    buildCommand(seq, Cmd.getBatteryLevel, const []);
-Uint8List cmdGetHello(int seq) =>
-    buildCommand(seq, Cmd.getHelloHarvard, const [0x00]);
-Uint8List cmdGetHelloModern(int seq) =>
-    buildCommand(seq, Cmd.getHello, const [0x01]);
+Uint8List cmdLinkValid(int seq, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.linkValid, const [0x00], profile);
+Uint8List cmdGetBattery(int seq, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.getBatteryLevel, const [], profile);
+Uint8List cmdGetHello(int seq, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.getHelloHarvard, const [0x00], profile);
+Uint8List cmdGetHelloModern(int seq, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.getHello, const [0x01], profile);
 
 /// ABORT_HISTORICAL_TRANSMITS (0x14 = 20), no semantic body. [profile]
 /// selects the envelope (gen5 pads the bodyless inner to `[35][seq][20][00]`).
-Uint8List cmdAbortHistorical(int seq,
-        {BandProfile profile = BandProfile.gen4}) =>
+Uint8List cmdAbortHistorical(int seq, {BandProfile profile = BandProfile.gen4}) =>
     buildCommand(seq, Cmd.abortHistoricalTransmits, const [0x00], profile);
-Uint8List cmdSendHistorical(int seq) =>
-    buildCommand(seq, Cmd.sendHistoricalData, const [0x00]);
 
+/// SEND_HISTORICAL_DATA (0x16) — starts the flash drain.
+///
+/// gen4 wants a single `[0x00]` byte; gen5 wants an EMPTY body (a non-empty
+/// body there was rejected outright, see `cmdGetDataRangeGen5`'s old note —
+/// folded into this builder since nothing ever called the gen4 shape on gen5).
+Uint8List cmdSendHistorical(int seq, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.sendHistoricalData,
+        profile.isGen5 ? const [] : const [0x00], profile);
 /// Read the strap RTC (GET_CLOCK = 0x0B = 11) with an EMPTY body.
 ///
 /// Shared across generations — hardware-verified on WHOOP 5: opcode 11 with
@@ -158,10 +163,14 @@ Uint8List cmdSetClock(int seq,
   return buildCommand(seq, Cmd.setClock, payload, profile);
 }
 
-Uint8List cmdGetDataRange(int seq) =>
-    buildCommand(seq, Cmd.getDataRange, const [0x00]);
-Uint8List cmdReportVersionInfo(int seq) =>
-    buildCommand(seq, Cmd.reportVersionInfo, const []);
+/// GET_DATA_RANGE (0x22) — shared opcode, envelope + payload differ by
+/// profile: gen4 takes a `[0x00]` body, gen5 expects an EMPTY payload (see
+/// control.dart's dual-profile decoder for this opcode).
+Uint8List cmdGetDataRange(int seq, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.getDataRange,
+        profile.isGen5 ? const [] : const [0x00], profile);
+Uint8List cmdReportVersionInfo(int seq, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.reportVersionInfo, const [], profile);
 
 // Both of these used to send an EMPTY body. gen5 reads the missing first byte
 // as revision 0 and rejects the command outright, so neither ever returned
@@ -231,8 +240,8 @@ Uint8List cmdSelectWrist(int seq, WristSelection selection,
 // That puts [cmdEnableOptical] (0x6B) next to the 0x99 persistent-save family
 // rather than next to a live stream. Unconfirmed for gen4, so the opcodes are
 // left pointed where they are — only the description is corrected.
-Uint8List cmdToggleHr(int seq, bool on) =>
-    buildCommand(seq, Cmd.toggleRealtimeHr, [on ? 0x01 : 0x00]);
+Uint8List cmdToggleHr(int seq, bool on, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.toggleRealtimeHr, [on ? 0x01 : 0x00], profile);
 
 /// Toggle the realtime raw (R10/R11) stream (SEND_R10_R11_REALTIME = 0x3F).
 ///
@@ -244,8 +253,8 @@ Uint8List cmdToggleHr(int seq, bool on) =>
 /// ⚠ That is INVERTED on gen5, which does not implement 0x3F at all: this
 /// command is silently ignored there, and 0x51/0x52 ([cmdRawDataStart] /
 /// [cmdRawDataStop]) are the realtime-raw start and stop instead.
-Uint8List cmdSendR10R11(int seq, bool on) =>
-    buildCommand(seq, Cmd.sendR10R11Realtime, [on ? 0x01 : 0x00]);
+Uint8List cmdSendR10R11(int seq, bool on, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.sendR10R11Realtime, [on ? 0x01 : 0x00], profile);
 
 /// Toggle the IMU data stream (IMU_SET_DATA_STREAM = 0x6A).
 ///
@@ -263,8 +272,8 @@ Uint8List cmdToggleImu(int seq, bool on,
           : <int>[on ? 0x01 : 0x00],
       profile,
     );
-Uint8List cmdEnableOptical(int seq, bool on) =>
-    buildCommand(seq, Cmd.enableOpticalData, [revision1, on ? 0x01 : 0x00]);
+Uint8List cmdEnableOptical(int seq, bool on, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.enableOpticalData, [revision1, on ? 0x01 : 0x00], profile);
 
 /// Play a haptic waveform effect (RUN_HAPTICS_PATTERN = 0x4F).
 ///
@@ -274,12 +283,13 @@ Uint8List cmdEnableOptical(int seq, bool on) =>
 /// nothing to tell the caller. A value that does not fit a u8 is a caller bug,
 /// so throw. (Contrast [cmdSetAlarm], which masks because its payload is a
 /// pattern LIST already validated for length.)
-Uint8List cmdBuzz(int seq, [int pattern = hapticShortPulse]) {
+Uint8List cmdBuzz(int seq,
+    [int pattern = hapticShortPulse, BandProfile profile = BandProfile.gen4]) {
   if (pattern < 0 || pattern > 0xff) {
     throw ArgumentError.value(
         pattern, 'pattern', 'haptic waveform effect must fit in a u8 (0-255)');
   }
-  return buildCommand(seq, Cmd.runHapticsPattern, [pattern, 0, 0, 0, 0]);
+  return buildCommand(seq, Cmd.runHapticsPattern, [pattern, 0, 0, 0, 0], profile);
 }
 
 // ── On-device haptic alarm (SET_ALARM_TIME = 0x42) ─────────────────────────
@@ -606,15 +616,6 @@ Uint8List cmdDisableAlarm(int seq,
 /// gen5 header layout. Sequence defaults to 1 to match that canonical frame.
 Uint8List gen5ClientHello({int seq = 1}) =>
     buildCommand(seq, Cmd.getHello, const [0x01], BandProfile.gen5);
-
-/// gen5 GET_DATA_RANGE (0x22) with the EMPTY payload gen5 expects.
-Uint8List cmdGetDataRangeGen5(int seq) =>
-    buildCommand(seq, Cmd.getDataRange, const [], BandProfile.gen5);
-
-/// gen5 SEND_HISTORICAL_DATA (0x16) with the EMPTY payload gen5 expects — the
-/// command that starts the flash drain.
-Uint8List cmdSendHistoricalGen5(int seq) =>
-    buildCommand(seq, Cmd.sendHistoricalData, const [], BandProfile.gen5);
 
 // ── gen5 clock (SET_CLOCK_MAVERICK=146 / GET_CLOCK_GEN5=147) ───────────────
 //
