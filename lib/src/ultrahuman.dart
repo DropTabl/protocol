@@ -187,7 +187,7 @@ const int kUltrahumanMeasureNotOnFinger = 100;
 /// `offset + 32 > bytes.length` — a truncated record, never guessed at.
 UltrahumanRecord? parseUltrahumanRecord(List<int> bytes, int offset) {
   if (offset < 0 || offset + kUltrahumanRecordLen > bytes.length) return null;
-  final b = Uint8List.fromList(bytes);
+  final b = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
   final d = b.buffer.asByteData(b.offsetInBytes + offset);
   return UltrahumanRecord(
     tsA: d.getUint32(0, Endian.little),

@@ -430,7 +430,7 @@ class Gen5HelloInfo {
     final batteryRaw = u32(body, 1) ~/ 10;
     return Gen5HelloInfo(
       helloRevision: body[0],
-      batteryPct: (batteryRaw >= 0 && batteryRaw <= 100) ? batteryRaw : null,
+      batteryPct: batteryRaw <= 100 ? batteryRaw : null,
       charging: (body[5] & 0x01) != 0,
       tsSeconds: u32(body, 6),
       tsSubseconds: u32(body, 10),
